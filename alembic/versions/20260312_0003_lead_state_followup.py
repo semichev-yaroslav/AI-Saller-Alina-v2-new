@@ -28,7 +28,9 @@ def upgrade() -> None:
     op.add_column("leads", sa.Column("handoff_requested", sa.Boolean(), nullable=False, server_default=sa.text("false")))
 
     op.execute(sa.text("UPDATE leads SET qualification_data = '{}' WHERE qualification_data IS NULL"))
-    op.alter_column("leads", "qualification_data", nullable=False)
+    bind = op.get_bind()
+    if bind.dialect.name != "sqlite":
+        op.alter_column("leads", "qualification_data", nullable=False)
 
     op.create_index("ix_leads_next_follow_up_at", "leads", ["next_follow_up_at"])
 

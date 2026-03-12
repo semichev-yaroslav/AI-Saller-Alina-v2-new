@@ -19,6 +19,20 @@ class BookingAnalyzer:
         )
 
 
+class BookingWithoutSlotAnalyzer:
+    model_name = "booking-analyzer-no-slot"
+
+    def analyze(self, message_text: str, context: AnalyzerContext) -> AnalyzerResult:
+        return AnalyzerResult(
+            intent=IntentType.BOOKING_INTENT,
+            stage=LeadStage.BOOKING_PENDING,
+            reply_text="Отлично, записала вас.",
+            confidence=0.95,
+            selected_slot=None,
+            raw={"provider": "dummy"},
+        )
+
+
 class CaptureSender:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str]] = []
@@ -58,3 +72,30 @@ def test_booking_marks_lead_booked_and_notifies_admin(db_session) -> None:
     assert sender.calls[0][0] == 5501
     assert sender.calls[1][0] == 999999
     assert "Новая запись на консультацию" in sender.calls[1][1]
+
+
+def test_booking_can_be_parsed_from_user_text_when_llm_slot_missing(db_session) -> None:
+    sender = CaptureSender()
+    processor = MessageProcessor(db_session, analyzer=BookingWithoutSlotAnalyzer(), telegram_sender=sender)
+    processor.settings.telegram_admin_chat_id = 999999
+
+    result = processor.process(
+        IncomingMessageDTO(
+            telegram_user_id=4601,
+            telegram_chat_id=5601,
+            username="book_user2",
+            full_name="Book User 2",
+            text="Давайте консультацию завтра в 11",
+            channel=MessageChannel.TELEGRAM,
+            telegram_message_id=11,
+            telegram_update_id=21,
+        )
+    )
+
+    lead = db_session.get(Lead, result.lead_id)
+
+    assert result.stage == LeadStage.BOOKED
+    assert lead is not None
+    assert lead.booking_slot_at is not None
+    assert lead.next_follow_up_at is None
+    assert len(sender.calls) == 2

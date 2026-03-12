@@ -4,7 +4,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,8 @@ from app.services.stage_policy import LeadStagePolicy
 logger = logging.getLogger(__name__)
 
 START_COMMAND_PATTERN = re.compile(r"^/start(?:@[\w_]+)?(?:\s+.*)?$", flags=re.IGNORECASE)
+TIME_WITH_MINUTES_PATTERN = re.compile(r"\b([01]?\d|2[0-3])[:.]([0-5]\d)\b")
+HOUR_ONLY_PATTERN = re.compile(r"(?:^|\s|в)\s*([01]?\d|2[0-3])\b")
 TELEGRAM_SEND_ATTEMPTS = 3
 
 STOP_PHRASES = (
@@ -197,12 +199,19 @@ class MessageProcessor:
         )
 
         final_stage = LeadStagePolicy.resolve(current=lead.stage, proposed=ai_result.stage)
-        booked_slot = self._resolve_selected_slot(ai_result.selected_slot, available_slots, now_utc)
+        had_confirmed_booking = lead.booking_slot_at is not None
+        booked_slot = self._resolve_booking_slot(
+            ai_selected_slot=ai_result.selected_slot,
+            user_text=dto.text,
+            available_slots=available_slots,
+            now_utc=now_utc,
+            allow_text_fallback=ai_result.intent in {IntentType.BOOKING_INTENT, IntentType.READY_TO_BUY},
+        )
         booking_confirmed = booked_slot is not None
         if booking_confirmed:
             final_stage = LeadStage.BOOKED
             lead.booking_slot_at = booked_slot.astimezone(UTC)
-        elif final_stage == LeadStage.BOOKED:
+        elif final_stage == LeadStage.BOOKED and not had_confirmed_booking:
             final_stage = LeadStage.BOOKING_PENDING
 
         reply_text = ai_result.reply_text
@@ -503,6 +512,65 @@ class MessageProcessor:
         if not is_valid_consultation_slot(parsed_slot, now_utc=now_utc):
             return None
         return parsed_slot
+
+    def _resolve_booking_slot(
+        self,
+        *,
+        ai_selected_slot: str | None,
+        user_text: str,
+        available_slots: list[str],
+        now_utc: datetime,
+        allow_text_fallback: bool,
+    ) -> datetime | None:
+        by_ai = self._resolve_selected_slot(ai_selected_slot, available_slots, now_utc)
+        if by_ai is not None:
+            return by_ai
+        if not allow_text_fallback:
+            return None
+        return self._resolve_slot_from_user_text(user_text=user_text, now_utc=now_utc)
+
+    def _resolve_slot_from_user_text(self, *, user_text: str, now_utc: datetime) -> datetime | None:
+        text = user_text.lower()
+        now_msk = now_utc.astimezone(MOSCOW_TZ)
+
+        day_offset = 0
+        if "послезавтра" in text:
+            day_offset = 2
+        elif "завтра" in text:
+            day_offset = 1
+        elif "сегодня" in text:
+            day_offset = 0
+
+        hour: int | None = None
+        minute: int | None = None
+
+        match_full = TIME_WITH_MINUTES_PATTERN.search(text)
+        if match_full:
+            hour = int(match_full.group(1))
+            minute = int(match_full.group(2))
+        else:
+            match_hour = HOUR_ONLY_PATTERN.search(text)
+            if match_hour:
+                hour = int(match_hour.group(1))
+                minute = 0
+
+        if hour is None or minute is None:
+            return None
+
+        candidate_date = (now_msk + timedelta(days=day_offset)).date()
+        candidate_slot = datetime(
+            year=candidate_date.year,
+            month=candidate_date.month,
+            day=candidate_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=MOSCOW_TZ,
+        )
+
+        if not is_valid_consultation_slot(candidate_slot, now_utc=now_utc):
+            return None
+
+        return candidate_slot
 
     def _build_booking_confirmation(self, slot_msk: datetime) -> str:
         formatted = slot_msk.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
