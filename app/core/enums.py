@@ -1,4 +1,10 @@
-from enum import StrEnum
+from enum import Enum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        pass
 
 
 class IntentType(StrEnum):
@@ -10,6 +16,14 @@ class IntentType(StrEnum):
     BOOKING_INTENT = "booking_intent"
     CONTACT_SHARING = "contact_sharing"
     UNCLEAR = "unclear"
+
+
+class AssistantAction(StrEnum):
+    REPLY = "reply"
+    ASK_QUESTION = "ask_question"
+    OFFER_CONSULTATION = "offer_consultation"
+    STOP = "stop"
+    HANDOFF = "handoff"
 
 
 class LeadStage(StrEnum):

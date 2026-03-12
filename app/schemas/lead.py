@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import IntentType, LeadStage
 
@@ -14,6 +14,15 @@ class LeadBase(BaseModel):
     email: str | None = None
     stage: LeadStage
     last_intent: IntentType | None = None
+    qualification_data: dict = Field(default_factory=dict)
+    follow_up_step: int = 0
+    next_follow_up_at: datetime | None = None
+    do_not_contact: bool = False
+    stopped_at: datetime | None = None
+    last_user_message_at: datetime | None = None
+    last_bot_message_at: datetime | None = None
+    booking_slot_at: datetime | None = None
+    handoff_requested: bool = False
 
 
 class LeadRead(LeadBase):

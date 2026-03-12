@@ -21,6 +21,10 @@
 - AI-анализ сообщения с учетом истории диалога и каталога услуг.
 - Структурированный AI-ответ: `intent`, `stage`, `reply_text`, `confidence`.
 - Каталог услуг с демо-данными и стартовыми ценами.
+- Follow-up цепочка возврата клиента: `+2ч`, `+24ч`, `+72ч` в окне 11:00-20:00 (МСК).
+- Бронирование консультаций по фиксированным слотам 11:00-17:00 (30 минут).
+- Обработка stop-фраз с паузой диалога и повторной активацией при новом сообщении клиента.
+- Уведомления админа в Telegram о записи на консультацию и запросах на живого менеджера.
 - API для просмотра лидов, сообщений и услуг.
 - Логи по входящим сообщениям, AI-вызовам, ошибкам и исходящим ответам.
 - Отдельный стартовый сценарий `/start` для рекламного входа в воронку.
@@ -100,6 +104,9 @@ ai-sales-manager/
 - профиль лида (`username`, `full_name`, `phone`, `email`)
 - текущая стадия (`new`, `engaged`, `qualified`, `interested`, `booking_pending`, `booked`, `lost`)
 - последний intent
+- `qualification_data` (собранные данные по квалификации)
+- `follow_up_step`, `next_follow_up_at`, `do_not_contact`, `stopped_at`
+- `booking_slot_at`, `handoff_requested`
 
 ### `messages`
 
@@ -185,6 +192,7 @@ curl -X POST http://localhost:8000/simulate/message \
 
 - `OPENAI_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ADMIN_CHAT_ID`
 - `DATABASE_URL`
 
 ## Запуск через Docker
@@ -228,6 +236,7 @@ pytest
 Покрыто:
 
 - unit tests (AI logic + message processor)
+- unit tests по follow-up/booking/stop/reactivation
 - API tests (`/simulate/message`, `/leads`, `/leads/{id}`, `/leads/{id}/messages`)
 
 ## Примечания

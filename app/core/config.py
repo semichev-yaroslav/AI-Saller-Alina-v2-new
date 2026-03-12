@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     openai_timeout_sec: float = 30.0
 
     telegram_bot_token: str | None = None
+    telegram_admin_chat_id: int | None = None
     telegram_poll_timeout_sec: int = 25
     telegram_poll_interval_sec: float = 1.0
 

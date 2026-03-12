@@ -50,4 +50,6 @@ def test_message_processor_creates_lead_extracts_contacts_and_prepends_intro(db_
     assert lead.phone == "+79991234567"
     assert lead.email == "test@example.com"
     assert result.intent == IntentType.CONTACT_SHARING
-    assert "Я Алина" in result.reply_text
+    assert result.reply_text == "Подберу решение, расскажите подробнее о процессе."
+    assert lead.follow_up_step == 0
+    assert lead.next_follow_up_at is not None

@@ -9,7 +9,7 @@ from openai import OpenAI
 from app.ai.contracts import AnalyzerContext, AnalyzerResult
 from app.ai.prompt_builder import build_system_prompt, build_user_prompt
 from app.core.config import get_settings
-from app.core.enums import IntentType, LeadStage
+from app.core.enums import AssistantAction, IntentType, LeadStage
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +22,27 @@ class LeadAnalyzer(Protocol):
 
 
 class HeuristicLeadAnalyzer:
-    model_name = "heuristic-v1"
+    model_name = "heuristic-v2"
 
     def analyze(self, message_text: str, context: AnalyzerContext) -> AnalyzerResult:
         text = message_text.lower()
         intent = self._detect_intent(text)
         stage = self._detect_stage(intent, context.current_stage)
-        reply = self._build_reply(intent, context.services)
+        action = self._detect_action(intent)
+        selected_slot = self._detect_selected_slot(text, context.available_slots)
+        handoff_to_admin = self._needs_handoff(text)
+        if selected_slot:
+            stage = LeadStage.BOOKED
+        reply = self._build_reply(intent, context.services, context.available_slots, selected_slot)
 
         return AnalyzerResult(
             intent=intent,
             stage=stage,
             reply_text=reply,
             confidence=0.62,
+            action=action,
+            selected_slot=selected_slot,
+            handoff_to_admin=handoff_to_admin,
             raw={"provider": "heuristic"},
         )
 
@@ -56,7 +64,7 @@ class HeuristicLeadAnalyzer:
         return IntentType.UNCLEAR
 
     def _detect_stage(self, intent: IntentType, current_stage: LeadStage) -> LeadStage:
-        if current_stage in {LeadStage.BOOKED, LeadStage.LOST}:
+        if current_stage == LeadStage.BOOKED:
             return current_stage
 
         mapping = {
@@ -71,53 +79,91 @@ class HeuristicLeadAnalyzer:
         }
         return mapping.get(intent, current_stage)
 
-    def _build_reply(self, intent: IntentType, services: list[dict[str, str]]) -> str:
+    def _detect_action(self, intent: IntentType) -> AssistantAction:
+        if intent == IntentType.BOOKING_INTENT:
+            return AssistantAction.OFFER_CONSULTATION
+        if intent in {IntentType.SERVICE_QUESTION, IntentType.GREETING, IntentType.UNCLEAR}:
+            return AssistantAction.ASK_QUESTION
+        if intent == IntentType.OBJECTION:
+            return AssistantAction.HANDOFF
+        return AssistantAction.REPLY
+
+    def _needs_handoff(self, text: str) -> bool:
+        handoff_keywords = (
+            "живой менеджер",
+            "с менеджером",
+            "оператор",
+            "договор",
+            "реквизиты",
+            "коммерческое предложение",
+        )
+        return any(keyword in text for keyword in handoff_keywords)
+
+    def _detect_selected_slot(self, text: str, available_slots: list[str]) -> str | None:
+        for slot in available_slots:
+            normalized_slot = slot.lower().replace("t", " ")
+            if normalized_slot in text:
+                return slot
+            date_part = normalized_slot.split(" ")[0]
+            time_part = normalized_slot.split(" ")[1][:5] if " " in normalized_slot else ""
+            if date_part in text and time_part and time_part in text:
+                return slot
+            if time_part and time_part in text and any(x in text for x in ["завтра", "сегодня"]):
+                return slot
+        return None
+
+    def _build_reply(
+        self,
+        intent: IntentType,
+        services: list[dict[str, str]],
+        available_slots: list[str],
+        selected_slot: str | None,
+    ) -> str:
         service_names = [item.get("name", "") for item in services if item.get("name")]
 
         if intent == IntentType.PRICE_QUESTION:
-            priced = []
-            for srv in services:
-                name = srv.get("name")
-                price = srv.get("price_from")
-                currency = srv.get("currency")
-                if name and price:
-                    priced.append(f"{name}: от {price} {currency or ''}".strip())
-            if priced:
-                return "Вот актуальные стартовые цены: " + "; ".join(priced) + ". Что из этого ближе к вашей задаче?"
-            return "Точные цены зависят от объема работ. Опишите задачу, и я предложу релевантный вариант с оценкой."
+            return (
+                "Стоимость внедрения AI-менеджера фиксированная: 120 000 рублей. "
+                "Скажите, какой результат для вас сейчас важнее: не терять заявки или увеличить записи на консультацию?"
+            )
 
         if intent == IntentType.READY_TO_BUY:
             return (
-                "Отлично, зафиксировал интерес к покупке. Напишите удобные контакты и желаемое время созвона, "
-                "чтобы перейти к следующему шагу."
+                "Отлично, тогда предлагаю короткую консультацию на 30 минут. "
+                "Какое время вам удобнее?"
             )
 
         if intent == IntentType.BOOKING_INTENT:
-            return "Готов организовать бронь. Укажите удобную дату, время и контакт для подтверждения."
+            if selected_slot:
+                return f"Отлично, зафиксировала консультацию на {selected_slot}. Подтверждаю запись."
+            if available_slots:
+                options = ", ".join(available_slots[:2])
+                return f"Могу предложить ближайшие окна: {options}. Какой вариант вам удобнее?"
+            return "Готова подобрать время консультации. Какой день и время вам удобно?"
 
         if intent == IntentType.OBJECTION:
             return (
-                "Понимаю сомнения. Давайте уточним, что для вас критично: бюджет, сроки или функционал. "
-                "Под это предложу оптимальный формат."
+                "Понимаю. Давайте разберем ваш кейс на короткой консультации и покажу, где вы сможете сохранить заявки. "
+                "Удобно?"
             )
 
         if intent == IntentType.SERVICE_QUESTION:
             listed = ", ".join(service_names[:4]) if service_names else "AI-решения под задачи бизнеса"
             return (
-                f"Я Алина, менеджер по продажам AI-решений. Можем предложить: {listed}. "
-                "Что для вас приоритетно: обработка заявок, воронка продаж, прогрев или интеграция с CRM?"
+                f"Я Алина, менеджер по продажам. Для бизнеса обычно внедряют: {listed}. "
+                "Скажите, откуда к вам обычно приходят заявки?"
             )
 
         if intent == IntentType.CONTACT_SHARING:
-            return "Контакты получил. Подскажите, какую задачу хотите автоматизировать в первую очередь?"
+            return "Контакты получила. Скажите, сколько заявок примерно приходит в месяц?"
 
         if intent == IntentType.GREETING:
             return (
-                "Здравствуйте. Я Алина, менеджер по продажам по внедрению AI в бизнес-процессы. "
-                "Опишите вашу задачу, и я помогу подобрать подходящий формат внедрения."
+                "Привет. Я Алина, менеджер по продажам. "
+                "Скажите, чем занимается ваш бизнес?"
             )
 
-        return "Уточните, пожалуйста, вашу цель: продажи, поддержка, обработка заявок или база знаний?"
+        return "Правильно понимаю, вам важно не терять заявки и быстрее отвечать клиентам?"
 
 
 class OpenAILeadAnalyzer:
@@ -136,6 +182,8 @@ class OpenAILeadAnalyzer:
             current_stage=context.current_stage.value,
             history=context.history,
             services=context.services,
+            qualification_data=context.qualification_data,
+            available_slots=context.available_slots,
         )
 
         response = self._client.chat.completions.create(
@@ -158,6 +206,10 @@ class OpenAILeadAnalyzer:
         stage = self._to_stage(payload.get("stage"), fallback=context.current_stage)
         reply_text = str(payload.get("reply_text") or "Уточните, пожалуйста, ваш запрос.").strip()
         confidence = self._to_confidence(payload.get("confidence"))
+        action = self._to_action(payload.get("action"))
+        collected_data = self._to_collected_data(payload.get("collected_data"))
+        selected_slot = self._to_selected_slot(payload.get("selected_slot"), context.available_slots)
+        handoff_to_admin = bool(payload.get("handoff_to_admin"))
 
         raw = {
             "provider": "openai",
@@ -174,6 +226,10 @@ class OpenAILeadAnalyzer:
             stage=stage,
             reply_text=reply_text,
             confidence=confidence,
+            action=action,
+            collected_data=collected_data,
+            selected_slot=selected_slot,
+            handoff_to_admin=handoff_to_admin,
             raw=raw,
         )
 
@@ -204,6 +260,29 @@ class OpenAILeadAnalyzer:
         except (TypeError, ValueError):
             return 0.5
         return max(0.0, min(1.0, numeric))
+
+    def _to_action(self, value: object) -> AssistantAction:
+        try:
+            return AssistantAction(str(value))
+        except ValueError:
+            return AssistantAction.REPLY
+
+    def _to_collected_data(self, value: object) -> dict[str, str | int | float]:
+        if not isinstance(value, dict):
+            return {}
+        data: dict[str, str | int | float] = {}
+        for key, raw_value in value.items():
+            if isinstance(raw_value, (str, int, float)):
+                data[str(key)] = raw_value
+        return data
+
+    def _to_selected_slot(self, value: object, available_slots: list[str]) -> str | None:
+        if not isinstance(value, str):
+            return None
+        slot = value.strip()
+        if not slot:
+            return None
+        return slot if slot in available_slots else None
 
 
 def build_default_analyzer() -> LeadAnalyzer:
