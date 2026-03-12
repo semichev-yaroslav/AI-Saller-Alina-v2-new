@@ -6,6 +6,7 @@ from app.core.enums import MessageChannel
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
 from app.integrations.telegram_bot import TelegramBotClient
+from app.services.follow_up_service import FollowUpService
 from app.services.message_processor import IncomingMessageDTO, MessageProcessor
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,14 @@ def run_polling() -> None:
                         logger.info("Skipped duplicate telegram update", extra={"update_id": upd.update_id})
                 finally:
                     db.close()
+
+            follow_up_db = SessionLocal()
+            try:
+                follow_up_sent = FollowUpService(follow_up_db, bot).process_due(limit=20)
+                if follow_up_sent:
+                    logger.info("Follow-up messages sent", extra={"count": follow_up_sent})
+            finally:
+                follow_up_db.close()
 
             if not updates:
                 time.sleep(settings.telegram_poll_interval_sec)

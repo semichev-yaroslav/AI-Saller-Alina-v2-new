@@ -1,7 +1,7 @@
 from app.core.enums import LeadStage
 
 
-TERMINAL_STAGES = {LeadStage.BOOKED, LeadStage.LOST}
+TERMINAL_STAGES = {LeadStage.BOOKED}
 
 
 class LeadStagePolicy:

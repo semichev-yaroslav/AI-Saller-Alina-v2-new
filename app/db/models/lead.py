@@ -1,4 +1,6 @@
-from sqlalchemy import BigInteger, Enum, String
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import IntentType, LeadStage
@@ -21,6 +23,19 @@ class Lead(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Enum(LeadStage, native_enum=False), default=LeadStage.NEW, nullable=False, index=True
     )
     last_intent: Mapped[IntentType | None] = mapped_column(Enum(IntentType, native_enum=False), nullable=True)
+    qualification_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    follow_up_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_follow_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+    do_not_contact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    last_user_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_bot_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    booking_slot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    handoff_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     messages: Mapped[list["Message"]] = relationship("Message", back_populates="lead", cascade="all,delete-orphan")
     ai_runs: Mapped[list["AIRun"]] = relationship("AIRun", back_populates="lead", cascade="all,delete-orphan")
