@@ -63,6 +63,24 @@ STOP_REPLY_TEXT = "Понял, больше не буду писать.\nЕсл�
 ADMIN_BOOKING_TITLE = "Новая запись на консультацию"
 ADMIN_HANDOFF_TITLE = "Нужен живой менеджер"
 
+PRICE_REQUEST_HINTS = ("цена", "стоимость", "сколько стоит", "прайс", "цены")
+PRICE_REPLY_HINTS = ("120000", "120 000", "стоимость", "цена")
+AFFIRMATIVE_HINTS = ("да", "давайте", "ок", "хорошо", "согласен", "согласна", "подходит")
+UNKNOWN_ANSWER_HINTS = ("не знаю", "откуда знаю", "сложно сказать", "без понятия")
+
+QUALIFICATION_FLOW: tuple[tuple[str, str], ...] = (
+    ("lead_source", "Откуда к вам обычно приходят заявки?"),
+    ("monthly_leads", "Сколько заявок примерно приходит в месяц?"),
+    ("avg_ticket", "Какой у вас средний чек?"),
+    ("response_time", "Как быстро вы обычно отвечаете клиентам?"),
+    ("lost_dialogs", "Сколько заявок примерно теряется из-за пропущенных ответов или незавершенных диалогов?"),
+)
+
+PRIORITY_QUESTION = (
+    "Что для вас сейчас важнее: не терять заявки, увеличить количество записей "
+    "или полностью автоматизировать общение с клиентами?"
+)
+
 
 class TelegramSender:
     def send_message(self, chat_id: int, text: str) -> int | None:
@@ -174,7 +192,7 @@ class MessageProcessor:
             current_stage=lead.stage,
             history=[{"role": msg.source.value, "text": msg.text} for msg in context_messages],
             services=serialize_services_for_ai(services),
-            qualification_data=lead.qualification_data or {},
+            qualification_data=self._qualification_for_ai(lead.qualification_data or {}),
             available_slots=available_slots,
         )
 
@@ -192,13 +210,29 @@ class MessageProcessor:
             ai_result.intent = IntentType.CONTACT_SHARING
             ai_result.confidence = max(ai_result.confidence, 0.85)
 
+        normalized_collected = self._normalize_collected_data(ai_result.collected_data)
+        extracted_from_text = self._extract_qualification_from_text(
+            text=dto.text,
+            existing=lead.qualification_data or {},
+        )
         lead.qualification_data = self._merge_qualification_data(
             existing=lead.qualification_data or {},
-            collected=ai_result.collected_data,
+            collected={**normalized_collected, **extracted_from_text},
             contacts=contacts,
         )
 
         final_stage = LeadStagePolicy.resolve(current=lead.stage, proposed=ai_result.stage)
+        reply_text = ai_result.reply_text
+        reply_text, final_stage, asked_key = self._apply_guided_funnel(
+            user_text=dto.text,
+            intent=ai_result.intent,
+            current_stage=lead.stage,
+            proposed_stage=final_stage,
+            qualification_data=lead.qualification_data,
+            ai_reply=reply_text,
+        )
+        self._set_last_question_key(lead.qualification_data, asked_key)
+
         had_confirmed_booking = lead.booking_slot_at is not None
         booked_slot = self._resolve_booking_slot(
             ai_selected_slot=ai_result.selected_slot,
@@ -214,7 +248,6 @@ class MessageProcessor:
         elif final_stage == LeadStage.BOOKED and not had_confirmed_booking:
             final_stage = LeadStage.BOOKING_PENDING
 
-        reply_text = ai_result.reply_text
         if booking_confirmed and booked_slot is not None:
             reply_text = self._build_booking_confirmation(booked_slot)
         elif is_new_lead and ai_result.intent in {IntentType.GREETING, IntentType.SERVICE_QUESTION, IntentType.UNCLEAR}:
@@ -488,6 +521,162 @@ class MessageProcessor:
 
         lead.follow_up_step = 0
         lead.next_follow_up_at = schedule_follow_up_at(now_utc, 1)
+
+    def _apply_guided_funnel(
+        self,
+        *,
+        user_text: str,
+        intent: IntentType,
+        current_stage: LeadStage,
+        proposed_stage: LeadStage,
+        qualification_data: dict,
+        ai_reply: str,
+    ) -> tuple[str, LeadStage, str | None]:
+        text = user_text.lower()
+        price_requested = self._is_price_requested(text) or intent == IntentType.PRICE_QUESTION
+        booking_requested = intent in {IntentType.BOOKING_INTENT, IntentType.READY_TO_BUY}
+
+        if price_requested or booking_requested:
+            return ai_reply, proposed_stage, None
+
+        if self._mentions_price(ai_reply):
+            ai_reply = "Поняла. Сначала коротко разберу вашу ситуацию, чтобы дать точную рекомендацию."
+
+        next_question = self._next_missing_qualification_question(qualification_data)
+        if current_stage in {LeadStage.NEW, LeadStage.ENGAGED, LeadStage.QUALIFIED} and next_question is not None:
+            key, question = next_question
+            stage = LeadStage.ENGAGED if self._qualification_score(qualification_data) < 3 else LeadStage.QUALIFIED
+            return question, stage, key
+
+        if current_stage in {LeadStage.ENGAGED, LeadStage.QUALIFIED}:
+            return self._build_offer_bridge(qualification_data), LeadStage.INTERESTED, "priority"
+
+        if proposed_stage == LeadStage.INTERESTED and self._is_affirmative(text):
+            return self._build_offer_bridge(qualification_data), LeadStage.INTERESTED, "priority"
+
+        return ai_reply, proposed_stage, None
+
+    def _qualification_for_ai(self, data: dict) -> dict:
+        return {str(k): v for k, v in data.items() if not str(k).startswith("_")}
+
+    def _set_last_question_key(self, data: dict, key: str | None) -> None:
+        if key:
+            data["_last_question_key"] = key
+            return
+        data.pop("_last_question_key", None)
+
+    def _normalize_collected_data(self, collected: dict[str, str | int | float]) -> dict[str, str | int | float]:
+        normalized: dict[str, str | int | float] = {}
+        aliases = {
+            "lead_source": {"lead_source", "source", "traffic_source", "источник", "канал"},
+            "monthly_leads": {"monthly_leads", "leads_per_month", "requests_per_month", "заявки_в_месяц"},
+            "avg_ticket": {"avg_ticket", "average_ticket", "average_check", "средний_чек"},
+            "response_time": {"response_time", "reply_speed", "response_speed", "скорость_ответа"},
+            "lost_dialogs": {"lost_dialogs", "lost_leads", "losses", "потери"},
+            "priority": {"priority", "main_priority", "приоритет"},
+        }
+        for key, value in collected.items():
+            key_lower = str(key).lower()
+            target = None
+            for canonical, keys in aliases.items():
+                if key_lower in keys:
+                    target = canonical
+                    break
+            if target is None:
+                continue
+            normalized[target] = value
+        return normalized
+
+    def _extract_qualification_from_text(self, *, text: str, existing: dict) -> dict[str, str | int | float]:
+        lowered = text.lower()
+        extracted: dict[str, str | int | float] = {}
+
+        last_key = str(existing.get("_last_question_key") or "")
+        if last_key and any(hint in lowered for hint in UNKNOWN_ANSWER_HINTS):
+            extracted[last_key] = "неизвестно"
+
+        channels = [name for name in ("telegram", "instagram", "инстаграм", "сайт", "авито", "vk", "вк", "tiktok") if name in lowered]
+        if channels:
+            extracted["lead_source"] = ", ".join(dict.fromkeys(channels))
+
+        monthly_match = re.search(r"(\d{1,5})\s*(?:заяв|лид)", lowered)
+        if monthly_match:
+            extracted["monthly_leads"] = int(monthly_match.group(1))
+
+        if "средний чек" in lowered or "чек" in lowered:
+            ticket_match = re.search(r"(\d[\d\s]{1,12})(?:\s*(?:руб|₽|тыс|млн))?", lowered)
+            if ticket_match:
+                extracted["avg_ticket"] = re.sub(r"\s+", "", ticket_match.group(1))
+
+        if "отвеч" in lowered:
+            response_match = re.search(r"(\d+)\s*(минут|мин|час|часа|часов|ч)", lowered)
+            if response_match:
+                extracted["response_time"] = f"{response_match.group(1)} {response_match.group(2)}"
+
+        if "теря" in lowered or "пропада" in lowered or "не довод" in lowered:
+            lost_match = re.search(r"(\d{1,4})\s*%?", lowered)
+            extracted["lost_dialogs"] = lost_match.group(1) if lost_match else "есть потери"
+
+        if "не терять" in lowered:
+            extracted["priority"] = "не терять заявки"
+        elif "запис" in lowered:
+            extracted["priority"] = "увеличить записи"
+        elif "автомат" in lowered:
+            extracted["priority"] = "полная автоматизация"
+
+        return extracted
+
+    def _next_missing_qualification_question(self, data: dict) -> tuple[str, str] | None:
+        for key, question in QUALIFICATION_FLOW:
+            value = data.get(key)
+            if value is None:
+                return key, question
+            if isinstance(value, str) and not value.strip():
+                return key, question
+        if not data.get("priority"):
+            return "priority", PRIORITY_QUESTION
+        return None
+
+    def _qualification_score(self, data: dict) -> int:
+        score = 0
+        for key, _ in QUALIFICATION_FLOW:
+            value = data.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            score += 1
+        return score
+
+    def _build_offer_bridge(self, qualification_data: dict) -> str:
+        monthly = qualification_data.get("monthly_leads")
+        losses = qualification_data.get("lost_dialogs")
+
+        summary_bits: list[str] = []
+        if monthly:
+            summary_bits.append(f"у вас около {monthly} заявок в месяц")
+        if losses:
+            summary_bits.append("часть диалогов теряется")
+
+        summary = ""
+        if summary_bits:
+            summary = "Поняла, " + " и ".join(summary_bits) + ". "
+
+        return (
+            summary
+            + "В такой ситуации AI-менеджер может быстро отвечать, не терять диалоги и доводить клиентов до консультации. "
+            + PRIORITY_QUESTION
+        )
+
+    def _is_price_requested(self, text: str) -> bool:
+        return any(hint in text for hint in PRICE_REQUEST_HINTS)
+
+    def _mentions_price(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(hint in lowered for hint in PRICE_REPLY_HINTS)
+
+    def _is_affirmative(self, text: str) -> bool:
+        return any(re.search(rf"(?:^|\s){re.escape(token)}(?:$|[!,.?\s])", text) for token in AFFIRMATIVE_HINTS)
 
     def _merge_qualification_data(
         self,

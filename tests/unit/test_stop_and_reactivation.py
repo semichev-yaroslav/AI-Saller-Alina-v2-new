@@ -50,7 +50,7 @@ def test_stop_phrase_blocks_dialog_until_new_user_message(db_session) -> None:
     )
     lead = LeadRepository(db_session).get(stop_result.lead_id)
 
-    assert resumed_result.stage == LeadStage.QUALIFIED
+    assert resumed_result.stage == LeadStage.ENGAGED
     assert lead is not None
     assert lead.do_not_contact is False
     assert lead.next_follow_up_at is None
