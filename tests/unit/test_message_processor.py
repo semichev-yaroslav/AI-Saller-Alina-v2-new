@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 from app.ai.contracts import AnalyzerContext, AnalyzerResult
 from app.core.enums import IntentType, LeadStage, MessageChannel
@@ -31,6 +32,25 @@ class PriceJumpAnalyzer:
             reply_text="Стоимость внедрения 120000 рублей. Хотите консультацию?",
             confidence=0.91,
             raw={"provider": "dummy"},
+        )
+
+
+class ContextCaptureAnalyzer:
+    model_name = "capture"
+
+    def __init__(self) -> None:
+        self.last_history_size: int = 0
+        self.last_company_knowledge: list[dict[str, str]] = []
+
+    def analyze(self, message_text: str, context: AnalyzerContext) -> AnalyzerResult:
+        self.last_history_size = len(context.history)
+        self.last_company_knowledge = context.company_knowledge
+        return AnalyzerResult(
+            intent=IntentType.SERVICE_QUESTION,
+            stage=LeadStage.ENGAGED,
+            reply_text="Принято.",
+            confidence=0.8,
+            raw={"provider": "capture"},
         )
 
 
@@ -130,3 +150,61 @@ def test_guided_funnel_allows_price_when_user_asks_directly(db_session) -> None:
 
     assert "120000" in result.reply_text
     assert result.stage == LeadStage.INTERESTED
+
+
+def test_context_window_uses_last_100_messages(db_session) -> None:
+    analyzer = ContextCaptureAnalyzer()
+    processor = MessageProcessor(db_session, analyzer=analyzer)
+    processor.settings.history_window_messages = 100
+
+    for index in range(70):
+        processor.process(
+            IncomingMessageDTO(
+                telegram_user_id=880001,
+                telegram_chat_id=880001,
+                username="history_user",
+                full_name="History User",
+                text=f"Сообщение {index + 1}",
+                channel=MessageChannel.API_SIMULATION,
+            )
+        )
+
+    assert analyzer.last_history_size == 100
+
+
+def test_context_includes_company_knowledge_from_files(db_session, tmp_path: Path) -> None:
+    knowledge_dir = tmp_path / "company"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    (knowledge_dir / "offer.md").write_text(
+        "Мы внедряем AI-менеджера продаж для обработки заявок и записи на консультацию.",
+        encoding="utf-8",
+    )
+
+    analyzer = ContextCaptureAnalyzer()
+    processor = MessageProcessor(db_session, analyzer=analyzer)
+    old_dir = processor.settings.company_knowledge_dir
+    old_max_files = processor.settings.company_knowledge_max_files
+    old_max_chars = processor.settings.company_knowledge_max_chars
+
+    try:
+        processor.settings.company_knowledge_dir = str(knowledge_dir)
+        processor.settings.company_knowledge_max_files = 5
+        processor.settings.company_knowledge_max_chars = 1000
+
+        processor.process(
+            IncomingMessageDTO(
+                telegram_user_id=880002,
+                telegram_chat_id=880002,
+                username="knowledge_user",
+                full_name="Knowledge User",
+                text="Что вы продаете?",
+                channel=MessageChannel.API_SIMULATION,
+            )
+        )
+    finally:
+        processor.settings.company_knowledge_dir = old_dir
+        processor.settings.company_knowledge_max_files = old_max_files
+        processor.settings.company_knowledge_max_chars = old_max_chars
+
+    assert analyzer.last_company_knowledge
+    assert "AI-менеджера продаж" in analyzer.last_company_knowledge[0]["content"]

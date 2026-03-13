@@ -10,6 +10,7 @@ from app.ai.contracts import AnalyzerContext, AnalyzerResult
 from app.ai.prompt_builder import build_system_prompt, build_user_prompt
 from app.core.config import get_settings
 from app.core.enums import AssistantAction, IntentType, LeadStage
+from app.services.schedule import parse_slot
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class HeuristicLeadAnalyzer:
         handoff_to_admin = self._needs_handoff(text)
         if selected_slot:
             stage = LeadStage.BOOKED
-        reply = self._build_reply(intent, context.services, context.available_slots, selected_slot)
+        reply = self._build_reply(intent, context.services, context.company_knowledge, context.available_slots, selected_slot)
 
         return AnalyzerResult(
             intent=intent,
@@ -116,10 +117,12 @@ class HeuristicLeadAnalyzer:
         self,
         intent: IntentType,
         services: list[dict[str, str]],
+        company_knowledge: list[dict[str, str]],
         available_slots: list[str],
         selected_slot: str | None,
     ) -> str:
         service_names = [item.get("name", "") for item in services if item.get("name")]
+        knowledge_text = self._knowledge_offer(company_knowledge)
 
         if intent == IntentType.PRICE_QUESTION:
             return (
@@ -129,17 +132,17 @@ class HeuristicLeadAnalyzer:
 
         if intent == IntentType.READY_TO_BUY:
             return (
-                "Отлично, тогда предлагаю короткую консультацию на 30 минут. "
-                "Какое время вам удобнее?"
+                "Отлично. Когда вам удобно созвониться? "
+                "Напишите дату и время в формате ДД.ММ ЧЧ:ММ."
             )
 
         if intent == IntentType.BOOKING_INTENT:
             if selected_slot:
                 return f"Отлично, зафиксировала консультацию на {selected_slot}. Подтверждаю запись."
-            if available_slots:
-                options = ", ".join(available_slots[:2])
-                return f"Могу предложить ближайшие окна: {options}. Какой вариант вам удобнее?"
-            return "Готова подобрать время консультации. Какой день и время вам удобно?"
+            return (
+                "Подходит. Когда вам удобно? "
+                "Напишите дату и время в формате ДД.ММ ЧЧ:ММ."
+            )
 
         if intent == IntentType.OBJECTION:
             return (
@@ -148,7 +151,13 @@ class HeuristicLeadAnalyzer:
             )
 
         if intent == IntentType.SERVICE_QUESTION:
-            listed = ", ".join(service_names[:4]) if service_names else "AI-решения под задачи бизнеса"
+            listed = ", ".join(service_names[:4]) if service_names else "AI-менеджер продаж под задачи бизнеса"
+            if knowledge_text:
+                return (
+                    f"{knowledge_text} "
+                    "Если кратко, мы внедряем AI-менеджера, который ведет диалог с клиентами и доводит до консультации. "
+                    "Скажите, откуда к вам обычно приходят заявки?"
+                )
             return (
                 f"Я Алина, менеджер по продажам. Для бизнеса обычно внедряют: {listed}. "
                 "Скажите, откуда к вам обычно приходят заявки?"
@@ -164,6 +173,17 @@ class HeuristicLeadAnalyzer:
             )
 
         return "Правильно понимаю, вам важно не терять заявки и быстрее отвечать клиентам?"
+
+    def _knowledge_offer(self, company_knowledge: list[dict[str, str]]) -> str:
+        for item in company_knowledge:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            condensed = " ".join(content.split())
+            if len(condensed) > 220:
+                condensed = condensed[:217].rstrip() + "..."
+            return condensed
+        return ""
 
 
 class OpenAILeadAnalyzer:
@@ -183,6 +203,7 @@ class OpenAILeadAnalyzer:
             history=context.history,
             services=context.services,
             qualification_data=context.qualification_data,
+            company_knowledge=context.company_knowledge,
             available_slots=context.available_slots,
         )
 
@@ -282,7 +303,10 @@ class OpenAILeadAnalyzer:
         slot = value.strip()
         if not slot:
             return None
-        return slot if slot in available_slots else None
+        parsed = parse_slot(slot)
+        if parsed is None:
+            return None
+        return parsed.strftime("%Y-%m-%d %H:%M")
 
 
 def build_default_analyzer() -> LeadAnalyzer:

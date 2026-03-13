@@ -2,7 +2,7 @@ import json
 
 from app.core.enums import AssistantAction, IntentType, LeadStage
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 
 def build_system_prompt() -> str:
@@ -27,11 +27,15 @@ def build_system_prompt() -> str:
         "На этапах Greeting/Qualify не прыгай к цене и бронированию без причины. "
         "Если клиент сказал «давайте» после обсуждения проблемы, сначала объясни, что именно можно внедрить, "
         "и задай вопрос о приоритете, а не сообщай цену сразу. "
+        "В company_knowledge даны материалы о компании и продукте. "
+        "Когда клиент спрашивает, что именно вы продаете и что умеет система, опирайся на company_knowledge. "
         "Этапы воронки по внутренним stage: "
         "new=Greeting, engaged=Qualify, qualified=Value, interested=Offer, booking_pending=Close, booked=Booked, lost=Stopped. "
         "Используй collected_data только с ключами: lead_source, monthly_leads, avg_ticket, response_time, lost_dialogs, priority. "
-        "Для консультации используй только переданные слоты (МСК). "
-        "Если клиент выбрал слот, верни selected_slot ровно в ISO формате из available_slots. "
+        "На этапе Close сначала спроси, когда клиенту удобно созвониться. "
+        "Не предлагай фиксированные окна, пока клиент сам не назвал дату и время. "
+        "Когда клиент дал дату и время, верни selected_slot в формате YYYY-MM-DD HH:MM (МСК). "
+        "Если даты/времени нет, selected_slot оставь пустым. "
         "Если нужен живой менеджер (сложный/юридический вопрос или прямой запрос), поставь handoff_to_admin=true. "
         "Ответ верни строго JSON-объектом без markdown, полями: "
         "intent, stage, reply_text, confidence, action, collected_data, selected_slot, handoff_to_admin. "
@@ -48,6 +52,7 @@ def build_user_prompt(
     history: list[dict],
     services: list[dict],
     qualification_data: dict,
+    company_knowledge: list[dict],
     available_slots: list[str],
 ) -> str:
     payload = {
@@ -55,6 +60,7 @@ def build_user_prompt(
         "incoming_message": message_text,
         "history": history,
         "services": services,
+        "company_knowledge": company_knowledge,
         "known_qualification_data": qualification_data,
         "available_slots": available_slots,
         "requirements": {

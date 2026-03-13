@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     telegram_poll_timeout_sec: int = 25
     telegram_poll_interval_sec: float = 1.0
 
-    history_window_messages: int = Field(default=12, ge=4, le=50)
+    history_window_messages: int = Field(default=100, ge=10, le=200)
+    company_knowledge_dir: str = "knowledge/company"
+    company_knowledge_max_files: int = Field(default=12, ge=1, le=50)
+    company_knowledge_max_chars: int = Field(default=4000, ge=500, le=20000)
 
 
 @lru_cache

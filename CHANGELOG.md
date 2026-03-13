@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.2] - 2026-03-13
+
+### Added
+- Company knowledge loader from local files (`knowledge/company/*.md|*.txt`) and AI-context transfer.
+- Starter knowledge documents with product and implementation scope.
+- New tests for 100-message history window and company knowledge transfer.
+
+### Changed
+- Context window increased to 100 latest messages per lead (`HISTORY_WINDOW_MESSAGES=100` by default).
+- Booking flow switched to "when is convenient for you" format; bot asks for date and time from client.
+- Booking parser now accepts numeric date/time from user text (`ДД.ММ ЧЧ:ММ`) and stores consultation time.
+- Prompt contract upgraded to `v4` with explicit behavior for product context and booking dialogue.
+
 ## [0.2.1] - 2026-03-13
 
 ### Changed

@@ -8,6 +8,7 @@ class AnalyzerContext(BaseModel):
     history: list[dict[str, str]]
     services: list[dict[str, str]]
     qualification_data: dict[str, str | int | float] = Field(default_factory=dict)
+    company_knowledge: list[dict[str, str]] = Field(default_factory=list)
     available_slots: list[str] = Field(default_factory=list)
 
 

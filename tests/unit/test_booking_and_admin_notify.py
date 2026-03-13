@@ -8,13 +8,12 @@ class BookingAnalyzer:
     model_name = "booking-analyzer"
 
     def analyze(self, message_text: str, context: AnalyzerContext) -> AnalyzerResult:
-        selected_slot = context.available_slots[0]
         return AnalyzerResult(
             intent=IntentType.BOOKING_INTENT,
             stage=LeadStage.BOOKED,
             reply_text="Подтверждаю запись.",
             confidence=0.95,
-            selected_slot=selected_slot,
+            selected_slot="2099-12-31 11:00",
             raw={"provider": "dummy"},
         )
 
@@ -85,7 +84,7 @@ def test_booking_can_be_parsed_from_user_text_when_llm_slot_missing(db_session) 
             telegram_chat_id=5601,
             username="book_user2",
             full_name="Book User 2",
-            text="Давайте консультацию завтра в 11",
+            text="Давайте консультацию 31.12.2099 в 11:00",
             channel=MessageChannel.TELEGRAM,
             telegram_message_id=11,
             telegram_update_id=21,
