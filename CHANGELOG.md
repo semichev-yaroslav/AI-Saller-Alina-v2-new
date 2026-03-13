@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-03-13
+
+### Changed
+- Greeting scenario rewritten to a human-style sales opener without irrelevant "implementation options" list.
+- Guided funnel logic added to enforce one-step progression through qualification and prevent premature price jumps.
+- Price disclosure behavior tightened: price is allowed on direct request or later funnel stages, not early in discovery.
+- Qualification data handling improved with key normalization and text-based extraction for non-structured user replies.
+
+### Fixed
+- Scenario where user says "давайте" after discussing pain points no longer jumps directly to price.
+- Added targeted unit tests for anti-price-jump behavior and direct price request handling.
+
 ## [0.2.0] - 2026-03-12
 
 ### Added
