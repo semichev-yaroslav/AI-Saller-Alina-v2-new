@@ -233,7 +233,7 @@ class MessageProcessor:
         lead.stage = final_stage
         lead.last_intent = ai_result.intent
         lead.last_bot_message_at = now_utc
-        self._reset_follow_up_schedule(lead, now_utc)
+        self._reset_follow_up_schedule(lead, now_utc, channel=dto.channel)
 
         raw_response = ai_result.raw if isinstance(ai_result.raw, dict) else {}
         ai_run = self.ai_runs_repo.create(
@@ -418,12 +418,18 @@ class MessageProcessor:
     ) -> ProcessResult:
         services = self.services_repo.list_active()
         reply_text = build_start_funnel_intro([srv.name for srv in services])
-
-        final_stage = LeadStagePolicy.resolve(current=lead.stage, proposed=LeadStage.ENGAGED)
+        # Explicit /start means a fresh dialogue run.
+        # Do not preserve terminal BOOKED state from previous sessions.
+        final_stage = LeadStage.ENGAGED
         lead.stage = final_stage
         lead.last_intent = IntentType.GREETING
+        lead.do_not_contact = False
+        lead.stopped_at = None
+        lead.booking_slot_at = None
+        lead.handoff_requested = False
+        lead.qualification_data = {}
         lead.last_bot_message_at = now_utc
-        self._reset_follow_up_schedule(lead, now_utc)
+        self._reset_follow_up_schedule(lead, now_utc, channel=channel)
 
         self.ai_runs_repo.create(
             lead_id=lead.id,
@@ -469,7 +475,12 @@ class MessageProcessor:
             duplicate=False,
         )
 
-    def _reset_follow_up_schedule(self, lead: Lead, now_utc: datetime) -> None:
+    def _reset_follow_up_schedule(self, lead: Lead, now_utc: datetime, *, channel: MessageChannel) -> None:
+        if channel != MessageChannel.TELEGRAM:
+            lead.follow_up_step = 0
+            lead.next_follow_up_at = None
+            return
+
         if lead.do_not_contact or lead.stage in {LeadStage.BOOKED, LeadStage.LOST}:
             lead.follow_up_step = 0
             lead.next_follow_up_at = None

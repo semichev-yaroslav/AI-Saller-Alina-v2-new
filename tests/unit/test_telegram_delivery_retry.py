@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from app.ai.contracts import AnalyzerContext, AnalyzerResult
 from app.core.enums import DeliveryStatus, IntentType, LeadStage, MessageChannel
+from app.db.models.lead import Lead
 from app.db.models.message import Message
 from app.db.models.service import Service
 from app.services.message_processor import IncomingMessageDTO, MessageProcessor
@@ -60,8 +61,11 @@ def test_telegram_delivery_retries_and_marks_sent(db_session) -> None:
     )
 
     outgoing = db_session.get(Message, result.outgoing_message_id)
+    lead = db_session.get(Lead, result.lead_id)
 
     assert sender.calls == 2
     assert outgoing is not None
+    assert lead is not None
     assert outgoing.delivery_status == DeliveryStatus.SENT
     assert outgoing.telegram_message_id == 777
+    assert lead.next_follow_up_at is not None

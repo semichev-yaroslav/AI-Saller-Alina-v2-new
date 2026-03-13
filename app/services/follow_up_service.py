@@ -76,12 +76,21 @@ class FollowUpService:
         return sent_count
 
     def _get_due_leads(self, *, now_utc: datetime, limit: int) -> list[Lead]:
+        # Keep selection strict to valid non-terminal enum values.
+        # This avoids hard-fail if legacy rows contain old lowercase enum strings.
+        active_stages = [
+            LeadStage.NEW,
+            LeadStage.ENGAGED,
+            LeadStage.QUALIFIED,
+            LeadStage.INTERESTED,
+            LeadStage.BOOKING_PENDING,
+        ]
         stmt = (
             select(Lead)
             .where(Lead.next_follow_up_at.is_not(None))
             .where(Lead.next_follow_up_at <= now_utc)
             .where(Lead.do_not_contact.is_(False))
-            .where(Lead.stage.notin_([LeadStage.BOOKED, LeadStage.LOST]))
+            .where(Lead.stage.in_(active_stages))
             .order_by(Lead.next_follow_up_at.asc())
             .limit(limit)
         )
