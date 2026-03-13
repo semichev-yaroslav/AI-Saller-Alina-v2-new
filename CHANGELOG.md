@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-03-13
+
+### Added
+- Multi-step AI runtime with separate state extraction, sales strategy, and response writing layers.
+- Business case calculator for estimating losses, recoverable leads, and additional revenue.
+- Retrieval helper for selecting relevant company knowledge instead of passing raw files blindly.
+- Architecture document for the target `AI Sales Agent v2`.
+- Expanded sales knowledge document for the product value proposition.
+
+### Changed
+- Prompt layer redesigned for richer, more human sales conversations and stronger product/value explanation.
+- `MessageProcessor` now passes a structured lead profile into AI context.
+- Consultation flow now stores pending time and requires missing booking details to be collected before confirmation.
+- Booking flow now requests phone before final confirmation when it is missing.
+- Response guards are now soft and no longer force the old rigid question-by-question qualification flow.
+
 ## [0.2.2] - 2026-03-13
 
 ### Added

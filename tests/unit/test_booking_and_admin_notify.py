@@ -61,16 +61,15 @@ def test_booking_marks_lead_booked_and_notifies_admin(db_session) -> None:
 
     lead = db_session.get(Lead, result.lead_id)
 
-    assert result.stage == LeadStage.BOOKED
+    assert result.stage == LeadStage.BOOKING_PENDING
     assert lead is not None
-    assert lead.booking_slot_at is not None
+    assert lead.booking_slot_at is None
+    assert "номер телефона" in result.reply_text.lower()
     assert lead.next_follow_up_at is None
 
-    # 1 - клиенту, 2 - админу.
-    assert len(sender.calls) == 2
+    # Только клиенту: запись еще не подтверждена без телефона.
+    assert len(sender.calls) == 1
     assert sender.calls[0][0] == 5501
-    assert sender.calls[1][0] == 999999
-    assert "Новая запись на консультацию" in sender.calls[1][1]
 
 
 def test_booking_can_be_parsed_from_user_text_when_llm_slot_missing(db_session) -> None:
@@ -93,8 +92,50 @@ def test_booking_can_be_parsed_from_user_text_when_llm_slot_missing(db_session) 
 
     lead = db_session.get(Lead, result.lead_id)
 
-    assert result.stage == LeadStage.BOOKED
+    assert result.stage == LeadStage.BOOKING_PENDING
     assert lead is not None
-    assert lead.booking_slot_at is not None
+    assert lead.booking_slot_at is None
     assert lead.next_follow_up_at is None
-    assert len(sender.calls) == 2
+    assert "номер телефона" in result.reply_text.lower()
+    assert len(sender.calls) == 1
+
+
+def test_booking_confirms_after_phone_is_provided(db_session) -> None:
+    sender = CaptureSender()
+    processor = MessageProcessor(db_session, analyzer=BookingAnalyzer(), telegram_sender=sender)
+    processor.settings.telegram_admin_chat_id = 999999
+
+    first = processor.process(
+        IncomingMessageDTO(
+            telegram_user_id=4701,
+            telegram_chat_id=5701,
+            username="book_user3",
+            full_name="Book User 3",
+            text="Давайте завтра в 11:00",
+            channel=MessageChannel.TELEGRAM,
+            telegram_message_id=12,
+            telegram_update_id=22,
+        )
+    )
+    second = processor.process(
+        IncomingMessageDTO(
+            telegram_user_id=4701,
+            telegram_chat_id=5701,
+            username="book_user3",
+            full_name="Book User 3",
+            text="Мой номер +7 999 111 22 33",
+            channel=MessageChannel.TELEGRAM,
+            telegram_message_id=13,
+            telegram_update_id=23,
+        )
+    )
+
+    lead = db_session.get(Lead, second.lead_id)
+
+    assert first.stage == LeadStage.BOOKING_PENDING
+    assert second.stage == LeadStage.BOOKED
+    assert lead is not None
+    assert lead.phone == "+79991112233"
+    assert lead.booking_slot_at is not None
+    assert len(sender.calls) == 3
+    assert sender.calls[-1][0] == 999999

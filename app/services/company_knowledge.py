@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +50,38 @@ def load_company_knowledge(
         )
 
     return docs
+
+
+def retrieve_company_knowledge(
+    *,
+    query: str,
+    documents: list[dict[str, str]],
+    limit: int = 4,
+) -> list[dict[str, str]]:
+    query_tokens = _tokenize(query)
+    if not documents:
+        return []
+    if not query_tokens:
+        return documents[:limit]
+
+    ranked: list[tuple[int, dict[str, str]]] = []
+    for doc in documents:
+        haystack = " ".join([str(doc.get("title") or ""), str(doc.get("content") or "")])
+        haystack_tokens = _tokenize(haystack)
+        score = sum(1 for token in query_tokens if token in haystack_tokens)
+        if score <= 0:
+            continue
+        ranked.append((score, doc))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    if ranked:
+        return [doc for _, doc in ranked[:limit]]
+    return documents[:limit]
+
+
+def _tokenize(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[A-Za-zА-Яа-я0-9]{3,}", text.lower())
+        if token not in {"это", "как", "что", "для", "или", "при", "the", "and"}
+    }

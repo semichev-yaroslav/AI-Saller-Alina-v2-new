@@ -199,6 +199,7 @@ class MessageProcessor:
             current_stage=lead.stage,
             history=[{"role": msg.source.value, "text": msg.text} for msg in context_messages],
             services=serialize_services_for_ai(services),
+            lead_profile=self._lead_profile_for_ai(lead),
             qualification_data=self._qualification_for_ai(lead.qualification_data or {}),
             company_knowledge=company_knowledge,
             available_slots=[],
@@ -228,43 +229,50 @@ class MessageProcessor:
             collected={**normalized_collected, **extracted_from_text},
             contacts=contacts,
         )
+        self._sync_preferred_name(lead)
 
         final_stage = LeadStagePolicy.resolve(current=lead.stage, proposed=ai_result.stage)
-        reply_text = ai_result.reply_text
-        reply_text, final_stage, asked_key = self._apply_guided_funnel(
+        reply_text = self._apply_response_guards(
             user_text=dto.text,
             intent=ai_result.intent,
             current_stage=lead.stage,
             proposed_stage=final_stage,
             qualification_data=lead.qualification_data,
-            ai_reply=reply_text,
+            ai_reply=ai_result.reply_text,
         )
-        self._set_last_question_key(lead.qualification_data, asked_key)
+        if reply_text != ai_result.reply_text and final_stage == LeadStage.INTERESTED:
+            final_stage = lead.stage if lead.stage != LeadStage.NEW else LeadStage.ENGAGED
+        self._set_last_question_key(lead.qualification_data, None)
 
         had_confirmed_booking = lead.booking_slot_at is not None
-        booking_requested = ai_result.intent in {IntentType.BOOKING_INTENT, IntentType.READY_TO_BUY}
+        booking_requested = ai_result.intent in {IntentType.BOOKING_INTENT, IntentType.READY_TO_BUY} or ai_result.selected_slot is not None
         booked_slot = self._resolve_booking_slot(
             ai_selected_slot=ai_result.selected_slot,
             user_text=dto.text,
             now_utc=now_utc,
             allow_text_fallback=booking_requested,
         )
-        booking_confirmed = booked_slot is not None
-        if booking_confirmed:
-            final_stage = LeadStage.BOOKED
-            lead.booking_slot_at = booked_slot.astimezone(UTC)
+        pending_slot = booked_slot or self._get_pending_booking_slot(lead.qualification_data)
+        booking_confirmed = False
+        missing_booking_details = self._missing_booking_details(lead)
+
+        if pending_slot is not None:
+            if missing_booking_details:
+                lead.qualification_data["_pending_selected_slot"] = pending_slot.strftime("%Y-%m-%d %H:%M")
+                reply_text = self._build_missing_booking_details_reply(missing_booking_details, pending_slot)
+                final_stage = LeadStage.BOOKING_PENDING
+            else:
+                booking_confirmed = True
+                final_stage = LeadStage.BOOKED
+                lead.booking_slot_at = pending_slot.astimezone(UTC)
+                lead.qualification_data.pop("_pending_selected_slot", None)
+                reply_text = self._build_booking_confirmation(pending_slot)
         elif final_stage == LeadStage.BOOKED and not had_confirmed_booking:
             final_stage = LeadStage.BOOKING_PENDING
 
-        if booking_confirmed and booked_slot is not None:
-            reply_text = self._build_booking_confirmation(booked_slot)
-        elif booking_requested:
+        if not booking_confirmed and booking_requested and pending_slot is None:
             reply_text = self._build_booking_request_reply()
             final_stage = LeadStage.BOOKING_PENDING
-        elif is_new_lead and ai_result.intent in {IntentType.GREETING, IntentType.SERVICE_QUESTION, IntentType.UNCLEAR}:
-            reply_text = build_first_touch_intro([srv.name for srv in services])
-            ai_result.intent = IntentType.GREETING
-            final_stage = LeadStage.ENGAGED
         elif ai_result.intent in {IntentType.OBJECTION, IntentType.UNCLEAR} and ai_result.confidence < 0.7:
             reply_text = f"{reply_text}\n\nЕсли хотите, могу подключить живого менеджера."
 
@@ -525,7 +533,7 @@ class MessageProcessor:
             lead.next_follow_up_at = None
             return
 
-        if lead.do_not_contact or lead.stage in {LeadStage.BOOKED, LeadStage.LOST}:
+        if lead.do_not_contact or lead.stage in {LeadStage.BOOKING_PENDING, LeadStage.BOOKED, LeadStage.LOST}:
             lead.follow_up_step = 0
             lead.next_follow_up_at = None
             return
@@ -533,7 +541,19 @@ class MessageProcessor:
         lead.follow_up_step = 0
         lead.next_follow_up_at = schedule_follow_up_at(now_utc, 1)
 
-    def _apply_guided_funnel(
+    def _lead_profile_for_ai(self, lead: Lead) -> dict[str, str]:
+        profile: dict[str, str] = {}
+        if lead.full_name:
+            profile["full_name"] = lead.full_name
+        if lead.username:
+            profile["username"] = lead.username
+        if lead.phone:
+            profile["phone"] = lead.phone
+        if lead.email:
+            profile["email"] = lead.email
+        return profile
+
+    def _apply_response_guards(
         self,
         *,
         user_text: str,
@@ -542,30 +562,32 @@ class MessageProcessor:
         proposed_stage: LeadStage,
         qualification_data: dict,
         ai_reply: str,
-    ) -> tuple[str, LeadStage, str | None]:
+    ) -> str:
         text = user_text.lower()
         price_requested = self._is_price_requested(text) or intent == IntentType.PRICE_QUESTION
         booking_requested = intent in {IntentType.BOOKING_INTENT, IntentType.READY_TO_BUY}
 
+        if not ai_reply.strip():
+            return "Поняла вас. Давайте чуть точнее разберу вашу ситуацию, чтобы дать полезную рекомендацию."
+
         if price_requested or booking_requested:
-            return ai_reply, proposed_stage, None
+            return ai_reply
 
-        if self._mentions_price(ai_reply):
-            ai_reply = "Поняла. Сначала коротко разберу вашу ситуацию, чтобы дать точную рекомендацию."
+        if current_stage in {LeadStage.NEW, LeadStage.ENGAGED, LeadStage.QUALIFIED} and self._mentions_price(ai_reply):
+            return (
+                "Поняла ваш интерес. Но сначала хочу коротко показать, где именно AI-менеджер может дать вам пользу и за счет чего он окупается."
+            )
 
-        next_question = self._next_missing_qualification_question(qualification_data)
-        if current_stage in {LeadStage.NEW, LeadStage.ENGAGED, LeadStage.QUALIFIED} and next_question is not None:
-            key, question = next_question
-            stage = LeadStage.ENGAGED if self._qualification_score(qualification_data) < 3 else LeadStage.QUALIFIED
-            return question, stage, key
+        if (
+            current_stage in {LeadStage.NEW, LeadStage.ENGAGED, LeadStage.QUALIFIED}
+            and proposed_stage in {LeadStage.BOOKING_PENDING, LeadStage.BOOKED}
+            and not price_requested
+        ):
+            return (
+                "Я могу предложить консультацию, но сначала хочу коротко показать, как это решение может сработать именно в вашей ситуации."
+            )
 
-        if current_stage in {LeadStage.ENGAGED, LeadStage.QUALIFIED}:
-            return self._build_offer_bridge(qualification_data), LeadStage.INTERESTED, "priority"
-
-        if proposed_stage == LeadStage.INTERESTED and self._is_affirmative(text):
-            return self._build_offer_bridge(qualification_data), LeadStage.INTERESTED, "priority"
-
-        return ai_reply, proposed_stage, None
+        return ai_reply
 
     def _qualification_for_ai(self, data: dict) -> dict:
         return {str(k): v for k, v in data.items() if not str(k).startswith("_")}
@@ -579,12 +601,16 @@ class MessageProcessor:
     def _normalize_collected_data(self, collected: dict[str, str | int | float]) -> dict[str, str | int | float]:
         normalized: dict[str, str | int | float] = {}
         aliases = {
+            "business_type": {"business_type", "niche", "industry", "сфера", "бизнес"},
             "lead_source": {"lead_source", "source", "traffic_source", "источник", "канал"},
             "monthly_leads": {"monthly_leads", "leads_per_month", "requests_per_month", "заявки_в_месяц"},
             "avg_ticket": {"avg_ticket", "average_ticket", "average_check", "средний_чек"},
             "response_time": {"response_time", "reply_speed", "response_speed", "скорость_ответа"},
             "lost_dialogs": {"lost_dialogs", "lost_leads", "losses", "потери"},
+            "conversion_rate": {"conversion_rate", "conversion", "close_rate", "конверсия"},
             "priority": {"priority", "main_priority", "приоритет"},
+            "preferred_name": {"preferred_name", "name", "client_name", "имя"},
+            "phone": {"phone", "contact_phone", "телефон"},
         }
         for key, value in collected.items():
             key_lower = str(key).lower()
@@ -610,6 +636,10 @@ class MessageProcessor:
         if channels:
             extracted["lead_source"] = ", ".join(dict.fromkeys(channels))
 
+        name_match = re.search(r"(?:меня зовут|можно обращаться|обращайтесь ко мне как)\s+([А-Яа-яA-Za-z\-]{2,30})", text, flags=re.IGNORECASE)
+        if name_match:
+            extracted["preferred_name"] = name_match.group(1).strip().title()
+
         monthly_match = re.search(r"(\d{1,5})\s*(?:заяв|лид)", lowered)
         if monthly_match:
             extracted["monthly_leads"] = int(monthly_match.group(1))
@@ -627,6 +657,11 @@ class MessageProcessor:
         if "теря" in lowered or "пропада" in lowered or "не довод" in lowered:
             lost_match = re.search(r"(\d{1,4})\s*%?", lowered)
             extracted["lost_dialogs"] = lost_match.group(1) if lost_match else "есть потери"
+
+        if "конверс" in lowered:
+            conversion_match = re.search(r"(\d{1,3}(?:[.,]\d+)?)\s*%", lowered)
+            if conversion_match:
+                extracted["conversion_rate"] = conversion_match.group(1).replace(",", ".")
 
         if "не терять" in lowered:
             extracted["priority"] = "не терять заявки"
@@ -703,11 +738,18 @@ class MessageProcessor:
             if isinstance(value, str) and not value.strip():
                 continue
             merged[key] = value
+        if merged.get("preferred_name") and not merged.get("full_name"):
+            merged["full_name"] = merged["preferred_name"]
         if contacts.get("phone"):
             merged["phone"] = contacts["phone"]
         if contacts.get("email"):
             merged["email"] = contacts["email"]
         return merged
+
+    def _sync_preferred_name(self, lead: Lead) -> None:
+        preferred_name = str((lead.qualification_data or {}).get("preferred_name") or "").strip()
+        if preferred_name and not lead.full_name:
+            lead.full_name = preferred_name
 
     def _resolve_selected_slot(
         self,
@@ -774,18 +816,51 @@ class MessageProcessor:
         localized = slot_msk.astimezone(MOSCOW_TZ).replace(second=0, microsecond=0)
         return localized > now_msk
 
+    def _get_pending_booking_slot(self, qualification_data: dict) -> datetime | None:
+        raw_slot = qualification_data.get("_pending_selected_slot")
+        if not isinstance(raw_slot, str) or not raw_slot.strip():
+            return None
+        return parse_slot(raw_slot)
+
     def _build_booking_request_reply(self) -> str:
         return BOOKING_REQUEST_TEXT
 
+    def _missing_booking_details(self, lead: Lead) -> list[str]:
+        missing: list[str] = []
+        preferred_name = str((lead.qualification_data or {}).get("preferred_name") or "").strip()
+        if not preferred_name and not (lead.full_name or "").strip():
+            missing.append("name")
+        if not (lead.phone or "").strip():
+            missing.append("phone")
+        return missing
+
+    def _build_missing_booking_details_reply(self, missing_fields: list[str], slot_msk: datetime) -> str:
+        formatted = slot_msk.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+        if missing_fields == ["phone"]:
+            return (
+                f"Время {formatted} мне подходит. "
+                "Чтобы подтвердить консультацию, пришлите, пожалуйста, номер телефона, на который удобно отправить подтверждение."
+            )
+        if missing_fields == ["name"]:
+            return (
+                f"Время {formatted} зафиксировала предварительно. "
+                "Подскажите, пожалуйста, как мне лучше к вам обращаться?"
+            )
+        return (
+            f"Время {formatted} предварительно зафиксировала. "
+            "Чтобы подтвердить консультацию, напишите, пожалуйста, как мне к вам обращаться и какой номер телефона указать для подтверждения."
+        )
+
     def _build_booking_confirmation(self, slot_msk: datetime) -> str:
         formatted = slot_msk.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
-        return f"Отлично, записала вас на консультацию {formatted} (МСК). Подтверждаю встречу."
+        return f"Отлично, записала вас на консультацию {formatted} (МСК). Подтверждение встречи зафиксировано."
 
     def _build_admin_booking_message(self, lead: Lead, incoming_text: str, slot_msk: datetime | None) -> str:
         slot_text = slot_msk.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M") if slot_msk else "не выбран"
+        display_name = str((lead.qualification_data or {}).get("preferred_name") or lead.full_name or "-")
         return (
             f"{ADMIN_BOOKING_TITLE}\n"
-            f"Лид: {lead.full_name or '-'} (@{lead.username or '-'})\n"
+            f"Лид: {display_name} (@{lead.username or '-'})\n"
             f"Telegram user id: {lead.telegram_user_id}\n"
             f"Telegram chat id: {lead.telegram_chat_id}\n"
             f"Слот: {slot_text} (МСК)\n"
@@ -795,9 +870,10 @@ class MessageProcessor:
         )
 
     def _build_admin_handoff_message(self, lead: Lead, incoming_text: str) -> str:
+        display_name = str((lead.qualification_data or {}).get("preferred_name") or lead.full_name or "-")
         return (
             f"{ADMIN_HANDOFF_TITLE}\n"
-            f"Лид: {lead.full_name or '-'} (@{lead.username or '-'})\n"
+            f"Лид: {display_name} (@{lead.username or '-'})\n"
             f"Telegram user id: {lead.telegram_user_id}\n"
             f"Telegram chat id: {lead.telegram_chat_id}\n"
             f"Стадия: {lead.stage.value}\n"

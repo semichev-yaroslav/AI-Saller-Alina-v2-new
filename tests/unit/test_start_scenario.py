@@ -45,8 +45,8 @@ def test_start_command_uses_separate_funnel_scenario(db_session) -> None:
 
     assert result.intent == IntentType.GREETING
     assert result.stage == LeadStage.ENGAGED
-    assert "общаюсь почти как живой человек" in result.reply_text
-    assert "Хотите, покажу, что я умею" in result.reply_text
+    assert "AI-менеджер по продажам" in result.reply_text
+    assert "Чем вы занимаетесь?" in result.reply_text
 
     assert ai_run is not None
     assert ai_run.model == "rule-start-v1"

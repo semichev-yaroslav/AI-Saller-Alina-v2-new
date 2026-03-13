@@ -7,6 +7,7 @@ class AnalyzerContext(BaseModel):
     current_stage: LeadStage
     history: list[dict[str, str]]
     services: list[dict[str, str]]
+    lead_profile: dict[str, str] = Field(default_factory=dict)
     qualification_data: dict[str, str | int | float] = Field(default_factory=dict)
     company_knowledge: list[dict[str, str]] = Field(default_factory=list)
     available_slots: list[str] = Field(default_factory=list)
