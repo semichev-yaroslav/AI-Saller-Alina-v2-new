@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file.
 ### Fixed
 - Scenario where user says "давайте" after discussing pain points no longer jumps directly to price.
 - Added targeted unit tests for anti-price-jump behavior and direct price request handling.
+- Follow-up worker now skips non-Telegram dialogs to avoid delivery retries with invalid chat targets.
 
 ## [0.2.0] - 2026-03-12
 

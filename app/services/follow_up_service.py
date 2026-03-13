@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import DeliveryStatus, LeadStage, MessageChannel, MessageSource
 from app.db.models.lead import Lead
+from app.db.models.message import Message
 from app.repositories.messages import MessageRepository
 from app.services.schedule import follow_up_message, schedule_follow_up_at
 
@@ -91,6 +92,13 @@ class FollowUpService:
             .where(Lead.next_follow_up_at <= now_utc)
             .where(Lead.do_not_contact.is_(False))
             .where(Lead.stage.in_(active_stages))
+            .where(
+                select(Message.id)
+                .where(Message.lead_id == Lead.id)
+                .where(Message.source == MessageSource.USER)
+                .where(Message.channel == MessageChannel.TELEGRAM)
+                .exists()
+            )
             .order_by(Lead.next_follow_up_at.asc())
             .limit(limit)
         )
